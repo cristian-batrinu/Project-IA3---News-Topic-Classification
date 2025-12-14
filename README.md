@@ -1,4 +1,4 @@
-# Adversarial Attacks and Defenses for BERT Text Classification
+# Adversarial Attacks and Defenses for News Topic Classification
 
 This project implements adversarial attacks (HotFlip, TextFooler) and defense mechanisms (Adversarial Training, Defensive Distillation) on BERT models for text classification using the AG News dataset.
 
