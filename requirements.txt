@@ -1,0 +1,6 @@
+transformers>=4.0.0
+datasets>=1.0.0
+torch>=1.8.0
+sentencepiece
+scikit-learn
+nltk
