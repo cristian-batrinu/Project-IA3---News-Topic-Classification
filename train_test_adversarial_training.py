@@ -1,3 +1,5 @@
+
+
 import sys
 import os
 import numpy as np
@@ -15,9 +17,11 @@ from sklearn.model_selection import train_test_split
 from nltk.corpus import wordnet
 from nltk.tag import pos_tag
 import nltk
+from preprocess_and_cache import SUBSET_PERCENTAGE
+from utils import get_dataloader_kwargs
+
 
 MODEL_NAME = 'lucasresck/bert-base-cased-ag-news'
-SUBSET_PERCENTAGE = 0.002
 MAX_LENGTH = 128
 BATCH_SIZE = 16
 NUM_EPOCHS = 3
@@ -25,9 +29,10 @@ LEARNING_RATE = 2e-5
 CACHE_DIR = 'cached_embeddings'
 MODELS_DIR = 'models'
 RESULTS_DIR = 'test_results'
-ADV_FRACTION = 0.3
+ADV_FRACTION = 0.5
 MAX_PERT_HOTFLIP = 5
 MAX_PERT_TEXTFOOLER = 10
+EVAL_SAMPLES = 500
 
 try:
     nltk.download('wordnet', quiet=True)
@@ -92,15 +97,27 @@ def textfooler_attack(model, tokenizer, text, label, device, max_perturbations=1
             with torch.no_grad():
                 outputs = model(**inputs)
                 pred = outputs.logits.argmax(dim=-1).item()
-                loss = nn.CrossEntropyLoss()(outputs.logits, torch.tensor([label]).to(device)).item()
-            
-            if pred != label and loss < best_loss:
-                best_syn = syn
-                best_loss = loss
+                
+                if pred != label:
+                    loss = nn.CrossEntropyLoss()(outputs.logits, torch.tensor([label]).to(device)).item()
+                    if loss < best_loss:
+                        best_syn = syn
+                        best_loss = loss
         
         if best_syn:
             perturbed[i] = best_syn
             count += 1
+            
+            test_text = ' '.join(perturbed)
+            inputs = tokenizer(test_text, return_tensors="pt", padding=True, truncation=True, max_length=MAX_LENGTH)
+            inputs = {k: v.to(device) for k, v in inputs.items()}
+            
+            with torch.no_grad():
+                outputs = model(**inputs)
+                pred = outputs.logits.argmax(dim=-1).item()
+            
+            if pred != label:
+                return test_text
     
     return ' '.join(perturbed)
 
@@ -202,6 +219,54 @@ def eval_model(model, dataloader, device):
     
     return acc, rec, f1, prec
 
+def evaluate_attack(model, tokenizer, test_texts, test_labels, attack_method, device, num_samples=None):
+    if num_samples is None:
+        num_samples = len(test_texts)
+    num_samples = min(num_samples, len(test_texts))
+    
+    attack_correct = 0
+    attack_total = 0
+    errors = 0
+    
+    model.eval()
+    for i in tqdm(range(num_samples), desc=f"Evaluating {attack_method} attack"):
+        text = test_texts[i]
+        label = test_labels[i]
+        
+        try:
+            if attack_method == 'hotflip':
+                label_tensor = torch.tensor(label, dtype=torch.long).to(device)
+                inputs = tokenizer(text, return_tensors="pt", padding=True, truncation=True, max_length=MAX_LENGTH)
+                input_ids = inputs['input_ids'].to(device)
+                attn_mask = inputs['attention_mask'].to(device)
+                
+                adv_ids = hotflip_attack(model, tokenizer, input_ids, attn_mask, label_tensor, device, MAX_PERT_HOTFLIP)
+                
+                with torch.no_grad():
+                    outputs = model(input_ids=adv_ids, attention_mask=attn_mask)
+                    pred = outputs.logits.argmax(dim=-1).item()
+            else:
+                adv_text = textfooler_attack(model, tokenizer, text, label, device, MAX_PERT_TEXTFOOLER)
+                inputs = tokenizer(adv_text, return_tensors="pt", padding=True, truncation=True, max_length=MAX_LENGTH)
+                inputs = {k: v.to(device) for k, v in inputs.items()}
+                
+                with torch.no_grad():
+                    outputs = model(**inputs)
+                    pred = outputs.logits.argmax(dim=-1).item()
+            
+            if pred == label:
+                attack_correct += 1
+            attack_total += 1
+        except Exception as e:
+            errors += 1
+            if errors <= 5:
+                print(f"Error on sample {i}: {str(e)}")
+    
+    attack_acc = attack_correct / attack_total if attack_total > 0 else 0
+    attack_success = 1 - attack_acc
+    
+    return attack_acc, attack_success, attack_total, errors
+
 class EmbeddingTextDataset(torch.utils.data.Dataset):
     def __init__(self, embeddings, labels, texts):
         self.embeddings = torch.FloatTensor(embeddings)
@@ -216,7 +281,7 @@ class EmbeddingTextDataset(torch.utils.data.Dataset):
 
 if __name__ == '__main__':
     if len(sys.argv) < 2:
-        print("Usage: python train_test_adversarial_training.py [hotflip|textfooler]")
+        print("Usage: python train_test_adversarial_training_improved.py [hotflip|textfooler]")
         sys.exit(1)
     
     attack_method = sys.argv[1].lower()
@@ -224,7 +289,9 @@ if __name__ == '__main__':
         print("Attack must be 'hotflip' or 'textfooler'")
         sys.exit(1)
     
-    print(f"Training with adversarial training ({attack_method})...")
+    print(f"Training with IMPROVED adversarial training ({attack_method})...")
+    print(f"Adversarial fraction: {ADV_FRACTION}")
+    print(f"Evaluation samples: {EVAL_SAMPLES}")
     
     os.makedirs(MODELS_DIR, exist_ok=True)
     os.makedirs(RESULTS_DIR, exist_ok=True)
@@ -257,9 +324,9 @@ if __name__ == '__main__':
     val_dataset = TensorDataset(torch.FloatTensor(val_emb), torch.LongTensor(val_labels))
     test_dataset = TensorDataset(torch.FloatTensor(test_emb), torch.LongTensor(test_labels))
     
-    train_dl = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
-    val_dl = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
-    test_dl = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
+    train_dl = DataLoader(train_dataset, **get_dataloader_kwargs(BATCH_SIZE, shuffle=True))
+    val_dl = DataLoader(val_dataset, **get_dataloader_kwargs(BATCH_SIZE, shuffle=False))
+    test_dl = DataLoader(test_dataset, **get_dataloader_kwargs(BATCH_SIZE, shuffle=False))
     
     model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME, num_labels=4)
     model.to(device)
@@ -269,8 +336,10 @@ if __name__ == '__main__':
     scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=0, num_training_steps=len(train_dl) * NUM_EPOCHS)
     
     print("Training...")
+    adv_generation_failures = 0
     for epoch in range(NUM_EPOCHS):
         model.train()
+        epoch_adv_count = 0
         
         for batch_data in tqdm(train_dl, desc=f"Epoch {epoch+1}"):
             emb_batch, label_batch, texts_batch = batch_data
@@ -301,6 +370,7 @@ if __name__ == '__main__':
                             adv_emb = model.bert.embeddings.word_embeddings(adv_ids)
                             adv_emb_list.append(adv_emb[:, 0, :])
                             adv_label_list.append(label)
+                            epoch_adv_count += 1
                     else:
                         adv_text = textfooler_attack(model, tokenizer, text, label, device, MAX_PERT_TEXTFOOLER)
                         inputs = tokenizer(adv_text, return_tensors="pt", padding=True, truncation=True, max_length=MAX_LENGTH)
@@ -310,9 +380,11 @@ if __name__ == '__main__':
                             adv_emb = model.bert.embeddings.word_embeddings(input_ids)
                             adv_emb_list.append(adv_emb[:, 0, :])
                             adv_label_list.append(label)
-                except:
+                            epoch_adv_count += 1
+                except Exception as e:
                     adv_emb_list.append(emb_batch[i:i+1])
                     adv_label_list.append(label_batch[i].item())
+                    adv_generation_failures += 1
             
             if adv_emb_list:
                 adv_emb_batch = torch.cat(adv_emb_list, dim=0).to(device)
@@ -335,78 +407,59 @@ if __name__ == '__main__':
             loss.backward()
             optimizer.step()
             scheduler.step()
+        
+        print(f"Epoch {epoch+1}: Generated {epoch_adv_count} adversarial examples")
+        if adv_generation_failures > 0:
+            print(f"Warning: {adv_generation_failures} adversarial generation failures")
     
     print("\nEvaluating...")
     train_acc, train_rec, train_f1, train_prec = eval_model(model, train_dl, device)
     val_acc, val_rec, val_f1, val_prec = eval_model(model, val_dl, device)
     test_acc, test_rec, test_f1, test_prec = eval_model(model, test_dl, device)
     
-    print(f"Testing under {attack_method} attack...")
-    attack_correct = 0
-    attack_total = min(100, len(test_texts))
+    print(f"\nTesting under {attack_method} attack (trained attack)...")
+    attack_acc_train, attack_success_train, attack_total_train, errors_train = evaluate_attack(
+        model, tokenizer, test_texts, test_labels, attack_method, device, EVAL_SAMPLES
+    )
     
-    model.eval()
-    for i in tqdm(range(attack_total), desc="Attack"):
-        text = test_texts[i]
-        label = test_labels[i]
-        
-        try:
-            if attack_method == 'hotflip':
-                label_tensor = torch.tensor(label, dtype=torch.long).to(device)
-                inputs = tokenizer(text, return_tensors="pt", padding=True, truncation=True, max_length=MAX_LENGTH)
-                input_ids = inputs['input_ids'].to(device)
-                attn_mask = inputs['attention_mask'].to(device)
-                
-                adv_ids = hotflip_attack(model, tokenizer, input_ids, attn_mask, label_tensor, device, MAX_PERT_HOTFLIP)
-                
-                with torch.no_grad():
-                    outputs = model(input_ids=adv_ids, attention_mask=attn_mask)
-                    pred = outputs.logits.argmax(dim=-1).item()
-            else:
-                adv_text = textfooler_attack(model, tokenizer, text, label, device, MAX_PERT_TEXTFOOLER)
-                inputs = tokenizer(adv_text, return_tensors="pt", padding=True, truncation=True, max_length=MAX_LENGTH)
-                inputs = {k: v.to(device) for k, v in inputs.items()}
-                
-                with torch.no_grad():
-                    outputs = model(**inputs)
-                    pred = outputs.logits.argmax(dim=-1).item()
-            
-            if pred == label:
-                attack_correct += 1
-        except:
-            attack_correct += 1
+    other_attack = 'textfooler' if attack_method == 'hotflip' else 'hotflip'
+    print(f"\nTesting under {other_attack} attack (cross-attack)...")
+    attack_acc_cross, attack_success_cross, attack_total_cross, errors_cross = evaluate_attack(
+        model, tokenizer, test_texts, test_labels, other_attack, device, EVAL_SAMPLES
+    )
     
-    attack_acc = attack_correct / attack_total if attack_total > 0 else 0
-    attack_success = 1 - attack_acc
-    
-    model_path = os.path.join(MODELS_DIR, f'adversarial_training_{attack_method}_model')
+    model_path = os.path.join(MODELS_DIR, f'adversarial_training_{attack_method}_improved_model')
     model.save_pretrained(model_path)
     tokenizer.save_pretrained(model_path)
     
     results = pd.DataFrame([{
-        'experiment': f'adversarial_training_{attack_method}',
-        'train_accuracy': train_acc,
-        'train_recall': train_rec,
-        'train_f1': train_f1,
-        'train_precision': train_prec,
-        'val_accuracy': val_acc,
-        'val_recall': val_rec,
-        'val_f1': val_f1,
-        'val_precision': val_prec,
-        'test_accuracy': test_acc,
-        'test_recall': test_rec,
-        'test_f1': test_f1,
-        'test_precision': test_prec,
-        'attack_accuracy': attack_acc,
-        'attack_success_rate': attack_success,
+        'experiment': f'adversarial_training_{attack_method}_improved',
+        'train_accuracy': round(train_acc, 4),
+        'train_recall': round(train_rec, 4),
+        'train_f1': round(train_f1, 4),
+        'train_precision': round(train_prec, 4),
+        'val_accuracy': round(val_acc, 4),
+        'val_recall': round(val_rec, 4),
+        'val_f1': round(val_f1, 4),
+        'val_precision': round(val_prec, 4),
+        'test_accuracy': round(test_acc, 4),
+        'test_recall': round(test_rec, 4),
+        'test_f1': round(test_f1, 4),
+        'test_precision': round(test_prec, 4),
+        'attack_accuracy_trained': round(attack_acc_train, 4),
+        'attack_success_rate_trained': round(attack_success_train, 4),
+        'attack_accuracy_cross': round(attack_acc_cross, 4),
+        'attack_success_rate_cross': round(attack_success_cross, 4),
         'num_epochs': NUM_EPOCHS,
         'batch_size': BATCH_SIZE,
         'learning_rate': LEARNING_RATE,
-        'adv_fraction': ADV_FRACTION,
+        'adv_fraction': round(ADV_FRACTION, 4),
         'attack_method': attack_method,
+        'eval_samples': EVAL_SAMPLES,
+        'adv_generation_failures': adv_generation_failures,
         'timestamp': datetime.now().strftime("%Y%m%d_%H%M%S")
     }])
-    results.to_csv(os.path.join(RESULTS_DIR, f'adversarial_training_{attack_method}_results_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv'), index=False)
+    results.to_csv(os.path.join(RESULTS_DIR, f'adversarial_training_{attack_method}_improved_results.csv'), index=False)
     
     print("\n" + "="*60)
     print("RESULTS")
@@ -414,5 +467,9 @@ if __name__ == '__main__':
     print(f"Train - Acc: {train_acc:.4f}, F1: {train_f1:.4f}, Prec: {train_prec:.4f}, Rec: {train_rec:.4f}")
     print(f"Val   - Acc: {val_acc:.4f}, F1: {val_f1:.4f}, Prec: {val_prec:.4f}, Rec: {val_rec:.4f}")
     print(f"Test  - Acc: {test_acc:.4f}, F1: {test_f1:.4f}, Prec: {test_prec:.4f}, Rec: {test_rec:.4f}")
-    print(f"Attack - Acc: {attack_acc:.4f}, Success: {attack_success:.4f}")
+    print(f"\nAttack ({attack_method}) - Acc: {attack_acc_train:.4f}, Success: {attack_success_train:.4f}")
+    print(f"Cross-Attack ({other_attack}) - Acc: {attack_acc_cross:.4f}, Success: {attack_success_cross:.4f}")
+    print(f"Evaluation samples: {attack_total_train}")
+    print(f"Adversarial generation failures: {adv_generation_failures}")
     print("="*60)
+

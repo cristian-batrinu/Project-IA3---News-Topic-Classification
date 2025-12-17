@@ -8,9 +8,10 @@ from tqdm import tqdm
 from sklearn.metrics import accuracy_score, recall_score, f1_score, precision_score
 import pandas as pd
 from datetime import datetime
+from preprocess_and_cache import SUBSET_PERCENTAGE
+from utils import get_dataloader_kwargs
 
 MODEL_NAME = 'lucasresck/bert-base-cased-ag-news'
-SUBSET_PERCENTAGE = 0.002
 BATCH_SIZE = 16
 NUM_EPOCHS = 3
 LEARNING_RATE = 2e-5
@@ -73,9 +74,9 @@ if __name__ == '__main__':
     val_ds = TensorDataset(torch.FloatTensor(val_emb), torch.LongTensor(val_labels))
     test_ds = TensorDataset(torch.FloatTensor(test_emb), torch.LongTensor(test_labels))
     
-    train_dl = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True)
-    val_dl = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False)
-    test_dl = DataLoader(test_ds, batch_size=BATCH_SIZE, shuffle=False)
+    train_dl = DataLoader(train_ds, **get_dataloader_kwargs(BATCH_SIZE, shuffle=True))
+    val_dl = DataLoader(val_ds, **get_dataloader_kwargs(BATCH_SIZE, shuffle=False))
+    test_dl = DataLoader(test_ds, **get_dataloader_kwargs(BATCH_SIZE, shuffle=False))
     
     model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME, num_labels=4)
     model.to(device)
@@ -83,13 +84,16 @@ if __name__ == '__main__':
     optimizer = AdamW(model.parameters(), lr=LEARNING_RATE)
     scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=0, num_training_steps=len(train_dl) * NUM_EPOCHS)
     
+    if torch.cuda.is_available():
+        torch.backends.cudnn.benchmark = True
+    
     best_val = 0.0
     for epoch in range(NUM_EPOCHS):
         model.train()
         
         for emb_batch, label_batch in tqdm(train_dl, desc=f"Epoch {epoch+1}"):
-            emb_batch = emb_batch.to(device)
-            label_batch = label_batch.to(device)
+            emb_batch = emb_batch.to(device, non_blocking=True)
+            label_batch = label_batch.to(device, non_blocking=True)
             label_batch = torch.clamp(label_batch, 0, 3)
             
             batch_size = emb_batch.size(0)
@@ -121,24 +125,24 @@ if __name__ == '__main__':
     
     results = pd.DataFrame([{
         'experiment': 'baseline',
-        'train_accuracy': train_acc,
-        'train_recall': train_rec,
-        'train_f1': train_f1,
-        'train_precision': train_prec,
-        'val_accuracy': val_acc,
-        'val_recall': val_rec,
-        'val_f1': val_f1,
-        'val_precision': val_prec,
-        'test_accuracy': test_acc,
-        'test_recall': test_rec,
-        'test_f1': test_f1,
-        'test_precision': test_prec,
+        'train_accuracy': round(train_acc, 4),
+        'train_recall': round(train_rec, 4),
+        'train_f1': round(train_f1, 4),
+        'train_precision': round(train_prec, 4),
+        'val_accuracy': round(val_acc, 4),
+        'val_recall': round(val_rec, 4),
+        'val_f1': round(val_f1, 4),
+        'val_precision': round(val_prec, 4),
+        'test_accuracy': round(test_acc, 4),
+        'test_recall': round(test_rec, 4),
+        'test_f1': round(test_f1, 4),
+        'test_precision': round(test_prec, 4),
         'num_epochs': NUM_EPOCHS,
         'batch_size': BATCH_SIZE,
         'learning_rate': LEARNING_RATE,
         'timestamp': datetime.now().strftime("%Y%m%d_%H%M%S")
     }])
-    results.to_csv(os.path.join(RESULTS_DIR, f'baseline_results_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv'), index=False)
+    results.to_csv(os.path.join(RESULTS_DIR, f'baseline_results.csv'), index=False)
     
     print("\n" + "="*60)
     print("RESULTS")

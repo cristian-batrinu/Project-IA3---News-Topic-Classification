@@ -16,9 +16,11 @@ from sklearn.model_selection import train_test_split
 from nltk.corpus import wordnet
 from nltk.tag import pos_tag
 import nltk
+from preprocess_and_cache import SUBSET_PERCENTAGE
+from utils import get_dataloader_kwargs
+
 
 MODEL_NAME = 'lucasresck/bert-base-cased-ag-news'
-SUBSET_PERCENTAGE = 0.002
 MAX_LENGTH = 128
 BATCH_SIZE = 16
 NUM_EPOCHS = 3
@@ -94,15 +96,27 @@ def textfooler_attack(model, tokenizer, text, label, device, max_perturbations=1
             with torch.no_grad():
                 outputs = model(**inputs)
                 pred = outputs.logits.argmax(dim=-1).item()
-                loss = nn.CrossEntropyLoss()(outputs.logits, torch.tensor([label]).to(device)).item()
-            
-            if pred != label and loss < best_loss:
-                best_syn = syn
-                best_loss = loss
+                
+                if pred != label:
+                    loss = nn.CrossEntropyLoss()(outputs.logits, torch.tensor([label]).to(device)).item()
+                    if loss < best_loss:
+                        best_syn = syn
+                        best_loss = loss
         
         if best_syn:
             perturbed[i] = best_syn
             count += 1
+            
+            test_text = ' '.join(perturbed)
+            inputs = tokenizer(test_text, return_tensors="pt", padding=True, truncation=True, max_length=MAX_LENGTH)
+            inputs = {k: v.to(device) for k, v in inputs.items()}
+            
+            with torch.no_grad():
+                outputs = model(**inputs)
+                pred = outputs.logits.argmax(dim=-1).item()
+            
+            if pred != label:
+                return test_text
     
     return ' '.join(perturbed)
 
@@ -245,9 +259,9 @@ if __name__ == '__main__':
     val_ds = TensorDataset(torch.FloatTensor(val_emb), torch.LongTensor(val_labels))
     test_ds = TensorDataset(torch.FloatTensor(test_emb), torch.LongTensor(test_labels))
     
-    train_dl = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True)
-    val_dl = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False)
-    test_dl = DataLoader(test_ds, batch_size=BATCH_SIZE, shuffle=False)
+    train_dl = DataLoader(train_ds, **get_dataloader_kwargs(BATCH_SIZE, shuffle=True))
+    val_dl = DataLoader(val_ds, **get_dataloader_kwargs(BATCH_SIZE, shuffle=False))
+    test_dl = DataLoader(test_ds, **get_dataloader_kwargs(BATCH_SIZE, shuffle=False))
     
     student_model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME, num_labels=4)
     student_model.to(device)
@@ -338,29 +352,29 @@ if __name__ == '__main__':
     
     results = pd.DataFrame([{
         'experiment': f'defensive_distillation_{attack_method}',
-        'train_accuracy': train_acc,
-        'train_recall': train_rec,
-        'train_f1': train_f1,
-        'train_precision': train_prec,
-        'val_accuracy': val_acc,
-        'val_recall': val_rec,
-        'val_f1': val_f1,
-        'val_precision': val_prec,
-        'test_accuracy': test_acc,
-        'test_recall': test_rec,
-        'test_f1': test_f1,
-        'test_precision': test_prec,
-        'attack_accuracy': attack_acc,
-        'attack_success_rate': attack_success,
+        'train_accuracy': round(train_acc, 4),
+        'train_recall': round(train_rec, 4),
+        'train_f1': round(train_f1, 4),
+        'train_precision': round(train_prec, 4),
+        'val_accuracy': round(val_acc, 4),
+        'val_recall': round(val_rec, 4),
+        'val_f1': round(val_f1, 4),
+        'val_precision': round(val_prec, 4),
+        'test_accuracy': round(test_acc, 4),
+        'test_recall': round(test_rec, 4),
+        'test_f1': round(test_f1, 4),
+        'test_precision': round(test_prec, 4),
+        'attack_accuracy': round(attack_acc, 4),
+        'attack_success_rate': round(attack_success, 4),
         'num_epochs': NUM_EPOCHS,
         'batch_size': BATCH_SIZE,
         'learning_rate': LEARNING_RATE,
-        'temperature': TEMPERATURE,
-        'alpha': ALPHA,
+        'temperature': round(TEMPERATURE, 4),
+        'alpha': round(ALPHA, 4),
         'attack_method': attack_method,
         'timestamp': datetime.now().strftime("%Y%m%d_%H%M%S")
     }])
-    results.to_csv(os.path.join(RESULTS_DIR, f'defensive_distillation_{attack_method}_results_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv'), index=False)
+    results.to_csv(os.path.join(RESULTS_DIR, f'defensive_distillation_{attack_method}_results.csv'), index=False)
     
     print("\n" + "="*60)
     print("RESULTS")

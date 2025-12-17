@@ -11,9 +11,10 @@ import pandas as pd
 from datetime import datetime
 from datasets import load_dataset
 from sklearn.model_selection import train_test_split
+from preprocess_and_cache import SUBSET_PERCENTAGE
+from utils import get_dataloader_kwargs
 
 MODEL_NAME = 'lucasresck/bert-base-cased-ag-news'
-SUBSET_PERCENTAGE = 0.002
 MAX_LENGTH = 128
 BATCH_SIZE = 16
 NUM_EPOCHS = 3
@@ -149,9 +150,9 @@ if __name__ == '__main__':
     val_ds = TensorDataset(torch.FloatTensor(val_emb), torch.LongTensor(val_labels))
     test_ds = TensorDataset(torch.FloatTensor(test_emb), torch.LongTensor(test_labels))
     
-    train_dl = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True)
-    val_dl = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False)
-    test_dl = DataLoader(test_ds, batch_size=BATCH_SIZE, shuffle=False)
+    train_dl = DataLoader(train_ds, **get_dataloader_kwargs(BATCH_SIZE, shuffle=True))
+    val_dl = DataLoader(val_ds, **get_dataloader_kwargs(BATCH_SIZE, shuffle=False))
+    test_dl = DataLoader(test_ds, **get_dataloader_kwargs(BATCH_SIZE, shuffle=False))
     
     model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME, num_labels=4)
     model.to(device)
@@ -217,27 +218,27 @@ if __name__ == '__main__':
     
     results = pd.DataFrame([{
         'experiment': 'hotflip',
-        'train_accuracy': train_acc,
-        'train_recall': train_rec,
-        'train_f1': train_f1,
-        'train_precision': train_prec,
-        'val_accuracy': val_acc,
-        'val_recall': val_rec,
-        'val_f1': val_f1,
-        'val_precision': val_prec,
-        'test_accuracy': test_acc,
-        'test_recall': test_rec,
-        'test_f1': test_f1,
-        'test_precision': test_prec,
-        'attack_accuracy': attack_acc,
-        'attack_success_rate': attack_success,
+        'train_accuracy': round(train_acc, 4),
+        'train_recall': round(train_rec, 4),
+        'train_f1': round(train_f1, 4),
+        'train_precision': round(train_prec, 4),
+        'val_accuracy': round(val_acc, 4),
+        'val_recall': round(val_rec, 4),
+        'val_f1': round(val_f1, 4),
+        'val_precision': round(val_prec, 4),
+        'test_accuracy': round(test_acc, 4),
+        'test_recall': round(test_rec, 4),
+        'test_f1': round(test_f1, 4),
+        'test_precision': round(test_prec, 4),
+        'attack_accuracy': round(attack_acc, 4),
+        'attack_success_rate': round(attack_success, 4),
         'num_epochs': NUM_EPOCHS,
         'batch_size': BATCH_SIZE,
         'learning_rate': LEARNING_RATE,
         'max_perturbations': MAX_PERTURBATIONS,
         'timestamp': datetime.now().strftime("%Y%m%d_%H%M%S")
     }])
-    results.to_csv(os.path.join(RESULTS_DIR, f'hotflip_results_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv'), index=False)
+    results.to_csv(os.path.join(RESULTS_DIR, f'hotflip_results.csv'), index=False)
     
     print("\n" + "="*60)
     print("RESULTS")
