@@ -18,7 +18,7 @@ except:
     pass
 
 MODEL_NAME = 'lucasresck/bert-base-cased-ag-news'
-SUBSET_PERCENTAGE = 0.002
+SUBSET_PERCENTAGE = 0.05
 MAX_LENGTH = 128
 BATCH_SIZE = 32
 CACHE_DIR = 'cached_embeddings'
